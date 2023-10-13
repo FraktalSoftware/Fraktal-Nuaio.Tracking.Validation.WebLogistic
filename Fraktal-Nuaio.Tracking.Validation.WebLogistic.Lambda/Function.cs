@@ -2,6 +2,7 @@ using Amazon.Lambda.Core;
 using FluentResults;
 using FluentValidation.Results;
 using Fraktal_Nuaio.Tracking.Validation.WebLogistic.Shared.Dtos;
+using Fraktal_Nuaio.Tracking.Validation.WebLogistic.Shared.Helpers;
 using Fraktal_Nuaio.Tracking.Validation.WebLogistic.Shared.Validators;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
@@ -13,13 +14,15 @@ namespace Fraktal_Nuaio.Tracking.Validation.WebLogistic.Lambda;
 
 public class Function
 {
-
     private readonly List<string> _alloredOriginList;
+    private readonly string _connectionString;
     private ILambdaContext _context;
 
     public Function()
     {
         _alloredOriginList = new() { "WL" };
+        _connectionString = Environment.GetEnvironmentVariable("ConnectionString") ?? throw new ArgumentException("Missing ConnectionString variable");
+
         JsonConvert.DefaultSettings = () => new JsonSerializerSettings
         {
             ContractResolver = new DefaultContractResolver
@@ -45,8 +48,9 @@ public class Function
 
         if (!_alloredOriginList.Contains(requets.Origin))
             return Result.Fail($"[{requets.Origin}] is not a valid Origin");
-        if (string.IsNullOrEmpty(requets.Event?.EventType ?? string.Empty))
-            return Result.Fail($"[{requets.Event?.EventType ?? string.Empty}] is not a valid Origin");
+        var eventType = requets.Event?.EventType ?? string.Empty;
+        if (requets.Event == null || string.IsNullOrEmpty(eventType))
+            return Result.Fail($"[{eventType}] is not a valid Event Type");
 
         var validatorResult = await DoValidations(requets);
 
@@ -57,6 +61,18 @@ public class Function
             //TODO: Send to Fail Queue
             return Result.Fail(validationResult);
         }
+
+        //TODO: Create json object to send to Queue
+        var jsonToQueue = string.Empty;
+
+        var processDetailId = await SqlServerHelper.IsUcidInBookingProcess(_connectionString, requets.Event.Ucid);
+        if (!processDetailId.HasValue)
+        {
+            await SqlServerHelper.InsertIntoUnparentedUcidsTable(_connectionString, requets.Origin, requets.Event.Ucid, input, jsonToQueue);
+            return Result.Fail($"{requets.Event.Ucid} is not present in any booking process.");
+        }
+
+        await SqlServerHelper.InsertProcesDetailStatusHistoryTable(_connectionString, requets.Origin, processDetailId.Value, false, true, requets.Event.StatusCode, requets.Event.StatusName, DateTime.Parse(requets.Event.StatusDate));
 
         //TODO: Send to Ok Queue if Booking of UCID is marked as NUAIO = TRUE
 
